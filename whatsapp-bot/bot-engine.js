@@ -1,6 +1,7 @@
 /* NutriViva · motor do atendimento automático pelo WhatsApp.
  * O mesmo arquivo roda no navegador (simulador do site) e no servidor Node (WhatsApp Cloud API).
- * NVBot.reply(db, telefone, texto, {uid, now}) altera o objeto db e devolve {replies, changed, chat}.
+ * await NVBot.reply(db, telefone, texto, {uid, now, hash, siteUrl}) altera o objeto db e devolve {replies, changed, chat}.
+ * hash(senha) deve devolver o SHA-256 em hexadecimal (o mesmo usado no login do site).
  */
 (function (root, factory) {
   const api = factory();
@@ -26,6 +27,7 @@
   }
   function safeUrl(v) { try { const u = new URL(v); return u.protocol === 'https:' ? u.href : ''; } catch { return ''; } }
   const duration = (db, proId) => (db.users.find(u => u.id === proId)?.duration || 50);
+  const prettyPhone = n => { const m = String(n).match(/^55(\d{2})(\d{4,5})(\d{4})$/); return m ? `(${m[1]}) ${m[2]}-${m[3]}` : '+' + n; };
   const findPatient = (db, phone) => db.users.find(u => u.role === 'paciente' && normPhone(u.phone) === phone) || null;
   const pros = db => db.users.filter(u => u.role === 'nutricionista');
 
@@ -56,7 +58,7 @@
   function menuText() {
     return ['Como posso ajudar? Responda com o *número*:', '',
       '*1* Agendar consulta', '*2* Minhas consultas', '*3* Cancelar consulta',
-      '*4* Nutricionistas e valores', '*5* Link da videochamada', '*6* Falar com um atendente', '',
+      '*4* Escolher nutricionista', '*5* Link da videochamada', '*6* Falar com um atendente', '',
       'A qualquer momento, envie *menu* para voltar aqui.'].join('\n');
   }
   function intent(t) {
@@ -66,14 +68,14 @@
     if (/link|sala|video|meet/.test(t)) return 5;
     if (/atendente|humano|pessoa|falar com/.test(t)) return 6;
     if (/agend|marcar|horario/.test(t)) return 1;
-    if (/valor|preco|nutricionista|especialidade|quanto custa/.test(t)) return 4;
+    if (/valor|preco|nutricionista|nutri|especialidade|quanto custa|escolher/.test(t)) return 4;
     return 0;
   }
   const GREETINGS = ['menu', 'inicio', 'oi', 'ola', 'oie', 'bom dia', 'boa tarde', 'boa noite', '0', 'voltar', 'comecar', 'robo'];
   const BYE = ['sair', 'encerrar', 'tchau', 'obrigado', 'obrigada', 'valeu'];
   const NOT_FOUND = 'Não encontrei um cadastro de paciente com este número de WhatsApp.\n\nSe você já tem conta no site, cadastre este número em *Minha conta*. Para agendar agora, envie *1*.';
 
-  function reply(db, phoneRaw, text, opts) {
+  async function reply(db, phoneRaw, text, opts) {
     opts = opts || {};
     const now = opts.now ? opts.now() : new Date();
     const uid = opts.uid;
@@ -83,6 +85,7 @@
     db.users = db.users || []; db.slots = db.slots || []; db.bookings = db.bookings || [];
     db.waChats = Array.isArray(db.waChats) ? db.waChats : [];
     const cfg = db.whatsapp || {};
+    const siteUrl = String(opts.siteUrl || cfg.siteUrl || '').trim();
 
     let chat = db.waChats.find(c => c.phone === phone);
     if (!chat) {
@@ -94,7 +97,9 @@
     if (idle && !chat.handoff) chat.state = { step: 'menu' };
 
     const body = String(text || '').slice(0, 1000);
-    chat.messages.push({ from: 'user', text: body, at: iso });
+    // A senha digitada no cadastro nunca fica gravada no histórico da conversa.
+    const secret = !chat.handoff && !idle && cfg.enabled !== false && chat.state?.step === 'askPassword';
+    chat.messages.push({ from: 'user', text: secret ? '•••••••• (senha ocultada)' : body, at: iso });
     const out = [];
     const say = m => out.push(m);
     const t = norm(body);
@@ -108,11 +113,35 @@
     const invalid = n => say(`Não entendi 🙂 Responda com um número de *1* a *${n}*, ou envie *menu*.`);
     const pick = list => { const n = Number(t); return Number.isInteger(n) && n >= 1 && n <= list.length ? list[n - 1] : null; };
 
+    function passwordPrompt() {
+      return `Agora crie uma *senha* com pelo menos 8 caracteres.\n\nNo dia da consulta, você vai entrar na plataforma com *este celular* e essa senha para acessar a videochamada.`;
+    }
     function startBooking() {
       const list = pros(db).map(p => ({ p, free: freeSlots(db, p.id, now) })).filter(x => x.free.length).slice(0, MAX_PROS);
       if (!list.length) { go({ step: 'menu' }); return say('No momento não há horários disponíveis. Envie *6* para falar com um atendente.'); }
       go({ step: 'pickPro', options: list.map(x => x.p.id) });
       say('Com quem você quer agendar?\n\n' + list.map((x, i) => `*${i + 1}* ${x.p.name} — ${x.p.specialty || 'Nutrição'} · ${money(x.p.price)}`).join('\n') + '\n\nResponda com o número.');
+    }
+    function listPros() {
+      const list = pros(db).slice(0, MAX_PROS);
+      if (!list.length) { go({ step: 'menu' }); return say('Ainda não há nutricionistas cadastrados.'); }
+      go({ step: 'choosePro', options: list.map(p => p.id) });
+      say('Qual nutricionista você quer conhecer?\n\n' + list.map((p, i) => {
+        const next = freeSlots(db, p.id, now)[0];
+        return `*${i + 1}* ${p.name}\n    ${p.specialty || 'Nutrição'} · ${money(p.price)}${next ? '' : ' · sem horários no momento'}`;
+      }).join('\n') + '\n\nResponda com o número.');
+    }
+    function showPro(proId) {
+      const p = db.users.find(u => u.id === proId && u.role === 'nutricionista');
+      if (!p) return listPros();
+      const free = freeSlots(db, p.id, now);
+      const lines = [`🩺 *${p.name}*`, `${p.specialty || 'Nutrição'}${p.crn ? ' · ' + p.crn : ''}`];
+      if (p.bio) lines.push('', p.bio);
+      lines.push('', `💰 ${money(p.price)} · ⏱ ${p.duration || 50} min · 💻 On-line`);
+      lines.push(free.length ? `📅 Próximo horário: ${fmt(free[0])}` : '📅 Sem horários disponíveis no momento');
+      lines.push('', free.length ? `*1* Agendar com ${p.name.split(' ')[0]}` : '*1* Falar com um atendente', '*2* Ver outro nutricionista');
+      go({ step: 'proAction', pro: p.id, hasSlots: free.length > 0 });
+      say(lines.join('\n'));
     }
     function listDates(proId) {
       const p = db.users.find(u => u.id === proId);
@@ -153,15 +182,7 @@
       if (n === 1) return startBooking();
       if (n === 2) return listMine(false);
       if (n === 3) return listMine(true);
-      if (n === 4) {
-        go({ step: 'menu' });
-        const list = pros(db);
-        if (!list.length) return say('Ainda não há nutricionistas cadastrados.');
-        return say('Nossos nutricionistas:\n\n' + list.map(p => {
-          const next = freeSlots(db, p.id, now)[0];
-          return `🩺 *${p.name}*\n${p.specialty || 'Nutrição'} · ${money(p.price)} · ${p.duration || 50} min\n${next ? 'Próximo horário: ' + fmt(next) : 'Sem horários no momento'}`;
-        }).join('\n\n') + '\n\nEnvie *1* para agendar.');
-      }
+      if (n === 4) return listPros();
       if (n === 5) {
         go({ step: 'menu' });
         const p = patient();
@@ -195,19 +216,40 @@
     // 4. Etapas da conversa
     else switch (state.step) {
       case 'pickPro': { const id = pick(state.options || []); id ? listDates(id) : invalid((state.options || []).length); break; }
+      case 'choosePro': { const id = pick(state.options || []); id ? showPro(id) : invalid((state.options || []).length); break; }
+      case 'proAction': {
+        if (t === '2' || /outro|lista/.test(t)) { listPros(); break; }
+        if (!(t === '1' || /agend|marcar|sim|atendente/.test(t))) { invalid(2); break; }
+        if (freeSlots(db, state.pro, now).length) listDates(state.pro); else runOption(6);
+        break;
+      }
       case 'pickDate': { const d = pick(state.options || []); d ? listTimes(state.pro, d) : invalid((state.options || []).length); break; }
       case 'pickTime': {
         const id = pick(state.options || []);
         if (!id) { invalid((state.options || []).length); break; }
         if (!freeSlots(db, state.pro, now).some(s => s.id === id)) { say('Esse horário acabou de ser reservado.'); listTimes(state.pro, state.date); break; }
-        if (patient()) askConfirm(id);
-        else { go({ step: 'askName', slot: id, pro: state.pro, date: state.date }); say('Para concluir, preciso do seu cadastro. Qual é o seu *nome completo*?'); }
+        const known = patient();
+        if (known && known.password) askConfirm(id);
+        else if (known) { go({ step: 'askPassword', slot: id, pro: state.pro, date: state.date, name: known.name }); say(passwordPrompt()); }
+        else { go({ step: 'askName', slot: id, pro: state.pro, date: state.date }); say('Você ainda não tem cadastro. Vamos criar agora, leva menos de um minuto. 🙂\n\nQual é o seu *nome completo*?'); }
         break;
       }
       case 'askName': {
         const name = body.trim().replace(/\s+/g, ' ');
         if (name.length < 3 || name.length > 100 || !/\p{L}{2,}/u.test(name) || /^\d+$/.test(name)) { say('Por favor, envie seu nome completo (ou *menu* para voltar).'); break; }
-        if (!patient()) db.users.push({ id: uid(), name, email: '', password: '', role: 'paciente', phone, origin: 'whatsapp', created: iso });
+        go({ ...state, step: 'askPassword', name });
+        say(passwordPrompt());
+        break;
+      }
+      case 'askPassword': {
+        const pass = body.trim();
+        if (pass.length < 8 || pass.length > 64) { say('A senha precisa ter de *8 a 64 caracteres*. Envie outra senha (ou *menu* para voltar).'); break; }
+        if (typeof opts.hash !== 'function') { go({ step: 'menu' }); say('Não foi possível criar o cadastro agora. Envie *6* para falar com um atendente.'); break; }
+        const passwordHash = await opts.hash(pass);
+        let p = patient();
+        if (p) p.password = passwordHash;
+        else { p = { id: uid(), name: state.name, email: '', password: passwordHash, role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
+        say(`Cadastro pronto, *${p.name.split(' ')[0]}*! ✅\n\nPara entrar na plataforma no dia da consulta:\n📱 Login: *${prettyPhone(phone)}* (este celular)\n🔒 Senha: a que você acabou de criar${siteUrl ? '\n🌐 ' + siteUrl : ''}\n\nPor segurança, apague a mensagem com a senha desta conversa (toque e segure → Apagar).`);
         askConfirm(state.slot);
         break;
       }
@@ -220,7 +262,7 @@
         db.bookings.push({ id: uid(), slot: s.id, patient: p.id, status: 'confirmada', created: iso, origin: 'whatsapp' });
         go({ step: 'menu' });
         const pro = db.users.find(u => u.id === s.pro);
-        say(`Consulta agendada! ✅\n\n📅 ${fmt(s)}\n🩺 ${pro?.name || ''}\n\nPerto do horário, envie *5* para receber o link da videochamada. Para cancelar, envie *3*.`);
+        say(`Consulta agendada! ✅\n\n📅 ${fmt(s)}\n🩺 ${pro?.name || ''}\n\nNo dia, entre na plataforma com seu celular e senha${siteUrl ? ' em ' + siteUrl : ''} e clique em *Entrar na sala*. Se preferir, envie *5* aqui para receber o link da videochamada. Para cancelar, envie *3*.`);
         break;
       }
       case 'pickCancel': {
