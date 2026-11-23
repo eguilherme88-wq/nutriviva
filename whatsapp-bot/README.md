@@ -10,7 +10,7 @@ O robô é o mesmo do simulador do site (`bot-engine.js`).
 | **1** Agendar consulta | Escolhe o nutricionista, o dia e o horário e confirma. Se o número ainda não tem cadastro, o robô pede o nome e cria o paciente. |
 | **2** Minhas consultas | Lista as próximas consultas confirmadas. |
 | **3** Cancelar consulta | Cancela e devolve o horário à agenda do nutricionista. |
-| **4** Nutricionistas e valores | Especialidade, valor, duração e próximo horário livre. |
+| **4** Escolher nutricionista | Lista os profissionais; o paciente escolhe um e vê o perfil (especialidade, CRN, apresentação, valor, duração e próximo horário) e pode agendar direto com ele. |
 | **5** Link da videochamada | Envia o link do Google Meet salvo na consulta (ou a sala padrão do profissional). |
 | **6** Falar com um atendente | Pausa o robô e coloca a conversa na fila da equipe. O paciente volta ao robô enviando **menu**. |
 

@@ -56,7 +56,7 @@
   function menuText() {
     return ['Como posso ajudar? Responda com o *número*:', '',
       '*1* Agendar consulta', '*2* Minhas consultas', '*3* Cancelar consulta',
-      '*4* Nutricionistas e valores', '*5* Link da videochamada', '*6* Falar com um atendente', '',
+      '*4* Escolher nutricionista', '*5* Link da videochamada', '*6* Falar com um atendente', '',
       'A qualquer momento, envie *menu* para voltar aqui.'].join('\n');
   }
   function intent(t) {
@@ -66,7 +66,7 @@
     if (/link|sala|video|meet/.test(t)) return 5;
     if (/atendente|humano|pessoa|falar com/.test(t)) return 6;
     if (/agend|marcar|horario/.test(t)) return 1;
-    if (/valor|preco|nutricionista|especialidade|quanto custa/.test(t)) return 4;
+    if (/valor|preco|nutricionista|nutri|especialidade|quanto custa|escolher/.test(t)) return 4;
     return 0;
   }
   const GREETINGS = ['menu', 'inicio', 'oi', 'ola', 'oie', 'bom dia', 'boa tarde', 'boa noite', '0', 'voltar', 'comecar', 'robo'];
@@ -114,6 +114,27 @@
       go({ step: 'pickPro', options: list.map(x => x.p.id) });
       say('Com quem você quer agendar?\n\n' + list.map((x, i) => `*${i + 1}* ${x.p.name} — ${x.p.specialty || 'Nutrição'} · ${money(x.p.price)}`).join('\n') + '\n\nResponda com o número.');
     }
+    function listPros() {
+      const list = pros(db).slice(0, MAX_PROS);
+      if (!list.length) { go({ step: 'menu' }); return say('Ainda não há nutricionistas cadastrados.'); }
+      go({ step: 'choosePro', options: list.map(p => p.id) });
+      say('Qual nutricionista você quer conhecer?\n\n' + list.map((p, i) => {
+        const next = freeSlots(db, p.id, now)[0];
+        return `*${i + 1}* ${p.name}\n    ${p.specialty || 'Nutrição'} · ${money(p.price)}${next ? '' : ' · sem horários no momento'}`;
+      }).join('\n') + '\n\nResponda com o número.');
+    }
+    function showPro(proId) {
+      const p = db.users.find(u => u.id === proId && u.role === 'nutricionista');
+      if (!p) return listPros();
+      const free = freeSlots(db, p.id, now);
+      const lines = [`🩺 *${p.name}*`, `${p.specialty || 'Nutrição'}${p.crn ? ' · ' + p.crn : ''}`];
+      if (p.bio) lines.push('', p.bio);
+      lines.push('', `💰 ${money(p.price)} · ⏱ ${p.duration || 50} min · 💻 On-line`);
+      lines.push(free.length ? `📅 Próximo horário: ${fmt(free[0])}` : '📅 Sem horários disponíveis no momento');
+      lines.push('', free.length ? `*1* Agendar com ${p.name.split(' ')[0]}` : '*1* Falar com um atendente', '*2* Ver outro nutricionista');
+      go({ step: 'proAction', pro: p.id, hasSlots: free.length > 0 });
+      say(lines.join('\n'));
+    }
     function listDates(proId) {
       const p = db.users.find(u => u.id === proId);
       const dates = [...new Set(freeSlots(db, proId, now).map(s => s.date))].slice(0, MAX_DATES);
@@ -153,15 +174,7 @@
       if (n === 1) return startBooking();
       if (n === 2) return listMine(false);
       if (n === 3) return listMine(true);
-      if (n === 4) {
-        go({ step: 'menu' });
-        const list = pros(db);
-        if (!list.length) return say('Ainda não há nutricionistas cadastrados.');
-        return say('Nossos nutricionistas:\n\n' + list.map(p => {
-          const next = freeSlots(db, p.id, now)[0];
-          return `🩺 *${p.name}*\n${p.specialty || 'Nutrição'} · ${money(p.price)} · ${p.duration || 50} min\n${next ? 'Próximo horário: ' + fmt(next) : 'Sem horários no momento'}`;
-        }).join('\n\n') + '\n\nEnvie *1* para agendar.');
-      }
+      if (n === 4) return listPros();
       if (n === 5) {
         go({ step: 'menu' });
         const p = patient();
@@ -195,6 +208,13 @@
     // 4. Etapas da conversa
     else switch (state.step) {
       case 'pickPro': { const id = pick(state.options || []); id ? listDates(id) : invalid((state.options || []).length); break; }
+      case 'choosePro': { const id = pick(state.options || []); id ? showPro(id) : invalid((state.options || []).length); break; }
+      case 'proAction': {
+        if (t === '2' || /outro|lista/.test(t)) { listPros(); break; }
+        if (!(t === '1' || /agend|marcar|sim|atendente/.test(t))) { invalid(2); break; }
+        if (freeSlots(db, state.pro, now).length) listDates(state.pro); else runOption(6);
+        break;
+      }
       case 'pickDate': { const d = pick(state.options || []); d ? listTimes(state.pro, d) : invalid((state.options || []).length); break; }
       case 'pickTime': {
         const id = pick(state.options || []);

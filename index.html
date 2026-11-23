@@ -84,7 +84,7 @@
   function menuText() {
     return ['Como posso ajudar? Responda com o *número*:', '',
       '*1* Agendar consulta', '*2* Minhas consultas', '*3* Cancelar consulta',
-      '*4* Nutricionistas e valores', '*5* Link da videochamada', '*6* Falar com um atendente', '',
+      '*4* Escolher nutricionista', '*5* Link da videochamada', '*6* Falar com um atendente', '',
       'A qualquer momento, envie *menu* para voltar aqui.'].join('\n');
   }
   function intent(t) {
@@ -94,7 +94,7 @@
     if (/link|sala|video|meet/.test(t)) return 5;
     if (/atendente|humano|pessoa|falar com/.test(t)) return 6;
     if (/agend|marcar|horario/.test(t)) return 1;
-    if (/valor|preco|nutricionista|especialidade|quanto custa/.test(t)) return 4;
+    if (/valor|preco|nutricionista|nutri|especialidade|quanto custa|escolher/.test(t)) return 4;
     return 0;
   }
   const GREETINGS = ['menu', 'inicio', 'oi', 'ola', 'oie', 'bom dia', 'boa tarde', 'boa noite', '0', 'voltar', 'comecar', 'robo'];
@@ -142,6 +142,27 @@
       go({ step: 'pickPro', options: list.map(x => x.p.id) });
       say('Com quem você quer agendar?\n\n' + list.map((x, i) => `*${i + 1}* ${x.p.name} — ${x.p.specialty || 'Nutrição'} · ${money(x.p.price)}`).join('\n') + '\n\nResponda com o número.');
     }
+    function listPros() {
+      const list = pros(db).slice(0, MAX_PROS);
+      if (!list.length) { go({ step: 'menu' }); return say('Ainda não há nutricionistas cadastrados.'); }
+      go({ step: 'choosePro', options: list.map(p => p.id) });
+      say('Qual nutricionista você quer conhecer?\n\n' + list.map((p, i) => {
+        const next = freeSlots(db, p.id, now)[0];
+        return `*${i + 1}* ${p.name}\n    ${p.specialty || 'Nutrição'} · ${money(p.price)}${next ? '' : ' · sem horários no momento'}`;
+      }).join('\n') + '\n\nResponda com o número.');
+    }
+    function showPro(proId) {
+      const p = db.users.find(u => u.id === proId && u.role === 'nutricionista');
+      if (!p) return listPros();
+      const free = freeSlots(db, p.id, now);
+      const lines = [`🩺 *${p.name}*`, `${p.specialty || 'Nutrição'}${p.crn ? ' · ' + p.crn : ''}`];
+      if (p.bio) lines.push('', p.bio);
+      lines.push('', `💰 ${money(p.price)} · ⏱ ${p.duration || 50} min · 💻 On-line`);
+      lines.push(free.length ? `📅 Próximo horário: ${fmt(free[0])}` : '📅 Sem horários disponíveis no momento');
+      lines.push('', free.length ? `*1* Agendar com ${p.name.split(' ')[0]}` : '*1* Falar com um atendente', '*2* Ver outro nutricionista');
+      go({ step: 'proAction', pro: p.id, hasSlots: free.length > 0 });
+      say(lines.join('\n'));
+    }
     function listDates(proId) {
       const p = db.users.find(u => u.id === proId);
       const dates = [...new Set(freeSlots(db, proId, now).map(s => s.date))].slice(0, MAX_DATES);
@@ -181,15 +202,7 @@
       if (n === 1) return startBooking();
       if (n === 2) return listMine(false);
       if (n === 3) return listMine(true);
-      if (n === 4) {
-        go({ step: 'menu' });
-        const list = pros(db);
-        if (!list.length) return say('Ainda não há nutricionistas cadastrados.');
-        return say('Nossos nutricionistas:\n\n' + list.map(p => {
-          const next = freeSlots(db, p.id, now)[0];
-          return `🩺 *${p.name}*\n${p.specialty || 'Nutrição'} · ${money(p.price)} · ${p.duration || 50} min\n${next ? 'Próximo horário: ' + fmt(next) : 'Sem horários no momento'}`;
-        }).join('\n\n') + '\n\nEnvie *1* para agendar.');
-      }
+      if (n === 4) return listPros();
       if (n === 5) {
         go({ step: 'menu' });
         const p = patient();
@@ -223,6 +236,13 @@
     // 4. Etapas da conversa
     else switch (state.step) {
       case 'pickPro': { const id = pick(state.options || []); id ? listDates(id) : invalid((state.options || []).length); break; }
+      case 'choosePro': { const id = pick(state.options || []); id ? showPro(id) : invalid((state.options || []).length); break; }
+      case 'proAction': {
+        if (t === '2' || /outro|lista/.test(t)) { listPros(); break; }
+        if (!(t === '1' || /agend|marcar|sim|atendente/.test(t))) { invalid(2); break; }
+        if (freeSlots(db, state.pro, now).length) listDates(state.pro); else runOption(6);
+        break;
+      }
       case 'pickDate': { const d = pick(state.options || []); d ? listTimes(state.pro, d) : invalid((state.options || []).length); break; }
       case 'pickTime': {
         const id = pick(state.options || []);
@@ -442,7 +462,7 @@ function waPretty(n){n=String(n||'');const m=n.match(/^55(\d{2})(\d{4,5})(\d{4})
 function waFormat(t){return esc(t).replace(/\*([^*\n]+)\*/g,'<b>$1</b>').replace(/(https:\/\/[^\s<]+)/g,'<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')}
 function waTime(at){return new Date(at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
 function waBubbles(chat,staffView){return (chat?.messages||[]).map(m=>{const mine=staffView?m.from!=='user':m.from==='user';const who=m.from==='agent'?'Atendente'+(m.by?' · '+esc(m.by):''):staffView&&m.from==='bot'?'Robô':'';return `<div class="wa-msg ${mine?'out':'in'}">${who?`<span class="wa-who">${who}</span>`:''}${waFormat(m.text)}<time>${waTime(m.at)}</time></div>`}).join('')}
-function waMount(){if($('#waFab'))return;document.body.insertAdjacentHTML('beforeend',`<button id="waFab" class="wa-fab hidden" type="button" onclick="waToggle()" aria-label="Atendimento pelo WhatsApp" aria-controls="waPanel" aria-expanded="false">✆ <span>Agende pelo WhatsApp</span></button><section id="waPanel" class="wa-panel hidden" aria-label="Atendimento automático pelo WhatsApp"><div class="wa-head"><div><b>NutriViva</b><small>Atendimento automático · simulador</small><span id="waReal"></span></div><button class="wa-x" type="button" aria-label="Fechar atendimento" onclick="waToggle(false)">×</button></div><div class="wa-phone"><label for="waPhoneInput">Seu WhatsApp:</label><input id="waPhoneInput" type="tel" maxlength="30" autocomplete="off"></div><div id="waMsgs" class="wa-msgs" role="log" aria-live="polite"></div><div class="wa-quick">${[['menu','Menu'],['1','Agendar'],['2','Minhas consultas'],['5','Link da sala'],['3','Cancelar'],['6','Atendente']].map(([v,l])=>`<button type="button" onclick="waSend('${v}')">${l}</button>`).join('')}</div><form id="waForm" class="wa-form"><input id="waInput" autocomplete="off" maxlength="500" placeholder="Digite uma mensagem" aria-label="Mensagem"><button class="wa-send" aria-label="Enviar">➤</button></form></section>`);$('#waForm').onsubmit=e=>{e.preventDefault();const v=$('#waInput').value;$('#waInput').value='';waSend(v)};$('#waPhoneInput').onchange=e=>{const n=rxPhone(e.target.value);if(!n){toast('Informe o número com DDD, por exemplo 47 99999-9999.');e.target.value=waPretty(waPhone());return}sessionStorage.setItem('nv-wa-phone',n);e.target.value=waPretty(n);waRenderMsgs()}}
+function waMount(){if($('#waFab'))return;document.body.insertAdjacentHTML('beforeend',`<button id="waFab" class="wa-fab hidden" type="button" onclick="waToggle()" aria-label="Atendimento pelo WhatsApp" aria-controls="waPanel" aria-expanded="false">✆ <span>Agende pelo WhatsApp</span></button><section id="waPanel" class="wa-panel hidden" aria-label="Atendimento automático pelo WhatsApp"><div class="wa-head"><div><b>NutriViva</b><small>Atendimento automático · simulador</small><span id="waReal"></span></div><button class="wa-x" type="button" aria-label="Fechar atendimento" onclick="waToggle(false)">×</button></div><div class="wa-phone"><label for="waPhoneInput">Seu WhatsApp:</label><input id="waPhoneInput" type="tel" maxlength="30" autocomplete="off"></div><div id="waMsgs" class="wa-msgs" role="log" aria-live="polite"></div><div class="wa-quick">${[['menu','Menu'],['4','Escolher nutricionista'],['1','Agendar'],['2','Minhas consultas'],['5','Link da sala'],['3','Cancelar'],['6','Atendente']].map(([v,l])=>`<button type="button" onclick="waSend('${v}')">${l}</button>`).join('')}</div><form id="waForm" class="wa-form"><input id="waInput" autocomplete="off" maxlength="500" placeholder="Digite uma mensagem" aria-label="Mensagem"><button class="wa-send" aria-label="Enviar">➤</button></form></section>`);$('#waForm').onsubmit=e=>{e.preventDefault();const v=$('#waInput').value;$('#waInput').value='';waSend(v)};$('#waPhoneInput').onchange=e=>{const n=rxPhone(e.target.value);if(!n){toast('Informe o número com DDD, por exemplo 47 99999-9999.');e.target.value=waPretty(waPhone());return}sessionStorage.setItem('nv-wa-phone',n);e.target.value=waPretty(n);waRenderMsgs()}}
 function waSync(){const fab=$('#waFab');if(!fab)return;const route=location.hash.slice(1),staffArea=['painel','gestao'].includes(route)&&user&&user.role!=='paciente';const show=waEnabled()&&!staffArea;fab.classList.toggle('hidden',!show);if(!show)$('#waPanel').classList.add('hidden');const n=rxPhone(db.whatsapp?.number||'');$('#waReal').innerHTML=n?`<a href="https://wa.me/${n}?text=${encodeURIComponent('Oi')}" target="_blank" rel="noopener noreferrer">Abrir o WhatsApp oficial ↗</a>`:'';if(!$('#waPanel').classList.contains('hidden'))waRenderMsgs()}
 function waToggle(open){const panel=$('#waPanel');open=open===undefined?panel.classList.contains('hidden'):open;panel.classList.toggle('hidden',!open);$('#waFab').setAttribute('aria-expanded',String(open));if(open){$('#waPhoneInput').value=waPretty(waPhone());waRenderMsgs();$('#waInput').focus()}}
 function waRenderMsgs(){const box=$('#waMsgs');if(!box)return;const phone=rxPhone(waPhone()),chat=(db.waChats||[]).find(c=>c.phone===phone);box.innerHTML=`<div class="wa-sys">Simulação do WhatsApp com a agenda deste navegador. Use dados fictícios.</div>${chat?.messages?.length?'':'<div class="wa-sys">Envie <b>oi</b> para começar.</div>'}${waBubbles(chat,false)}${chat?.handoff?'<div class="wa-sys">Aguardando um atendente da equipe. Envie <b>menu</b> para voltar ao robô.</div>':''}`;box.scrollTop=box.scrollHeight}
