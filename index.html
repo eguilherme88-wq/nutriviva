@@ -291,6 +291,7 @@
         go({ step: 'menu' });
         const pro = db.users.find(u => u.id === s.pro);
         say(`Consulta agendada! ✅\n\n📅 ${fmt(s)}\n🩺 ${pro?.name || ''}\n\nNo dia, entre na plataforma com seu celular e senha${siteUrl ? ' em ' + siteUrl : ''} e clique em *Entrar na sala*. Se preferir, envie *5* aqui para receber o link da videochamada. Para cancelar, envie *3*.`);
+        say(`Muito obrigado por agendar com a NutriViva, *${p.name.split(' ')[0]}*! 💚\nFicamos felizes em fazer parte do seu cuidado. Até a consulta! 🌿`);
         break;
       }
       case 'pickCancel': {
