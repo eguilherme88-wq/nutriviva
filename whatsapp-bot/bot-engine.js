@@ -113,6 +113,15 @@
     const invalid = n => say(`Não entendi 🙂 Responda com um número de *1* a *${n}*, ou envie *menu*.`);
     const pick = list => { const n = Number(t); return Number.isInteger(n) && n >= 1 && n <= list.length ? list[n - 1] : null; };
 
+    // Agradecimento final: só depois que o paciente usa a opção 5 (link) ou conclui a opção 3 (cancelar).
+    function thanks(cancelled) {
+      if (!chat.pendingThanks) return;
+      chat.pendingThanks = false;
+      const first = (patient()?.name || '').split(' ')[0];
+      say(cancelled
+        ? `Obrigado pelo contato${first ? ', *' + first + '*' : ''}! 💚 Quando quiser remarcar, é só enviar *1*. Estamos aqui para cuidar de você. 🌿`
+        : `Muito obrigado por agendar com a NutriViva${first ? ', *' + first + '*' : ''}! 💚\nFicamos felizes em fazer parte do seu cuidado. Até a consulta! 🌿`);
+    }
     function passwordPrompt() {
       return `Agora crie uma *senha* com pelo menos 8 caracteres.\n\nNo dia da consulta, você vai entrar na plataforma com *este celular* e essa senha para acessar a videochamada.`;
     }
@@ -189,11 +198,12 @@
         if (!p) return say(NOT_FOUND);
         const list = upcoming(db, p.id, now);
         if (!list.length) return say('Você não tem consultas agendadas. Envie *1* para agendar.');
-        return say(list.map(x => {
+        say(list.map(x => {
           const pro = db.users.find(u => u.id === x.s.pro);
           const url = x.b.room ? safeUrl(x.b.room) : safeUrl(pro?.room);
           return `📅 ${fmt(x.s)} — ${pro?.name || ''}\n${url ? '🔗 ' + url : 'O link ainda não foi disponibilizado. Ele aparece aqui assim que o nutricionista salvar a sala.'}`;
         }).join('\n\n'));
+        return thanks(false);
       }
       if (n === 6) {
         go({ step: 'menu' });
@@ -263,7 +273,7 @@
         go({ step: 'menu' });
         const pro = db.users.find(u => u.id === s.pro);
         say(`Consulta agendada! ✅\n\n📅 ${fmt(s)}\n🩺 ${pro?.name || ''}\n\nNo dia, entre na plataforma com seu celular e senha${siteUrl ? ' em ' + siteUrl : ''} e clique em *Entrar na sala*. Se preferir, envie *5* aqui para receber o link da videochamada. Para cancelar, envie *3*.`);
-        say(`Muito obrigado por agendar com a NutriViva, *${p.name.split(' ')[0]}*! 💚\nFicamos felizes em fazer parte do seu cuidado. Até a consulta! 🌿`);
+        chat.pendingThanks = true;
         break;
       }
       case 'pickCancel': {
@@ -275,13 +285,14 @@
         break;
       }
       case 'confirmCancel': {
-        if (t === '2' || /^nao|manter/.test(t)) { go({ step: 'menu' }); say('Tudo certo, sua consulta foi mantida. 👍'); break; }
+        if (t === '2' || /^nao|manter/.test(t)) { go({ step: 'menu' }); say('Tudo certo, sua consulta foi mantida. 👍'); thanks(false); break; }
         if (!(t === '1' || /^sim|cancel/.test(t))) { invalid(2); break; }
         const p = patient(), b = db.bookings.find(x => x.id === state.booking);
         go({ step: 'menu' });
         if (!p || !b || b.patient !== p.id || b.status !== 'confirmada') { say('Não foi possível cancelar essa consulta. Envie *6* para falar com um atendente.'); break; }
         b.status = 'cancelada'; b.cancelled = iso; b.cancelledBy = 'whatsapp';
         say('Consulta cancelada. O horário voltou para a agenda do nutricionista. Se quiser remarcar, envie *1*.');
+        thanks(true);
         break;
       }
       default: {
