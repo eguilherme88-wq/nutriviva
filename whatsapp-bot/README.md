@@ -7,7 +7,7 @@ O robô é o mesmo do simulador do site (`bot-engine.js`).
 
 | Opção | O que faz |
 |---|---|
-| **1** Agendar consulta | Escolhe o nutricionista, o dia e o horário e confirma. Se o número ainda não tem cadastro, o robô pede o nome e cria o paciente. |
+| **1** Agendar consulta | Escolhe o nutricionista, o dia e o horário e confirma. Se o número ainda não tem cadastro, o robô pede o nome e uma senha e cria o paciente. |
 | **2** Minhas consultas | Lista as próximas consultas confirmadas. |
 | **3** Cancelar consulta | Cancela e devolve o horário à agenda do nutricionista. |
 | **4** Escolher nutricionista | Lista os profissionais; o paciente escolhe um e vê o perfil (especialidade, CRN, apresentação, valor, duração e próximo horário) e pode agendar direto com ele. |
@@ -15,7 +15,15 @@ O robô é o mesmo do simulador do site (`bot-engine.js`).
 | **6** Falar com um atendente | Pausa o robô e coloca a conversa na fila da equipe. O paciente volta ao robô enviando **menu**. |
 
 O robô também entende frases como “quero marcar”, “cancelar minha consulta” e “qual o link da sala”.
-O paciente é identificado pelo número de WhatsApp, que ele cadastra em **Minha conta** no site.
+O paciente é identificado pelo número de WhatsApp.
+
+### Cadastro pelo WhatsApp e login pelo celular
+
+- Quem agenda sem cadastro informa o **nome** e cria uma **senha** (mínimo de 8 caracteres) na conversa.
+- O **celular é o login** do paciente na plataforma, e é obrigatório. No dia da consulta, ele entra com o celular e a senha e clica em *Entrar na sala*.
+- A senha é gravada apenas como hash SHA-256, o mesmo formato do login do site. No histórico da conversa ela aparece como `•••••••• (senha ocultada)`.
+  O robô orienta o paciente a apagar a mensagem com a senha no próprio WhatsApp.
+- O endereço da plataforma enviado ao paciente vem da variável `SITE_URL`.
 
 ## Instalação
 

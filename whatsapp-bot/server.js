@@ -20,6 +20,7 @@ const {
   WHATSAPP_TOKEN,
   PHONE_NUMBER_ID,
   ADMIN_TOKEN = '',
+  SITE_URL = 'https://eguilherme88-wq.github.io/nutriviva/',
   GRAPH_VERSION = 'v26.0',
   DB_FILE = path.join(__dirname, 'data', 'db.json'),
 } = process.env;
@@ -74,7 +75,12 @@ async function handleMessage(msg) {
     await sendText(msg.from, 'Por enquanto eu entendo apenas mensagens de texto. Envie *menu* para ver as opções.');
     return;
   }
-  const result = NVBot.reply(db, msg.from, text, { uid: () => crypto.randomUUID(), now: () => new Date() });
+  const result = await NVBot.reply(db, msg.from, text, {
+    uid: () => crypto.randomUUID(),
+    now: () => new Date(),
+    hash: p => crypto.createHash('sha256').update(p, 'utf8').digest('hex'),
+    siteUrl: SITE_URL,
+  });
   if (result.changed) saveDb();
   for (const r of result.replies) await sendText(msg.from, r);
 }
