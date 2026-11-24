@@ -259,6 +259,7 @@
         try {
           if (typeof opts.createAccount === 'function') {
             const id = await opts.createAccount({ phone, name: state.name || p?.name, password: pass });
+            if (!p) p = patient(); // o cadastro pode já ter chegado pelo banco
             if (!p) { p = { id, name: state.name, email: '', role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
           } else if (typeof opts.hash === 'function') {
             const passwordHash = await opts.hash(pass);
@@ -281,7 +282,7 @@
         if (!s || !p || !freeSlots(db, s.pro, now).some(x => x.id === s.id)) { say('Esse horário não está mais disponível.'); listTimes(state.pro, state.date); break; }
         if (overlaps(db, p.id, s)) { go({ step: 'menu' }); say('Você já tem uma consulta nesse período. Envie *2* para ver suas consultas.'); break; }
         const bookingId = uid();
-        db.bookings.push({ id: bookingId, slot: s.id, patient: p.id, pro: s.pro, status: 'confirmada', created: iso, origin: 'whatsapp' });
+        db.bookings.push({ id: bookingId, slot: s.id, patient: p.id, pro: s.pro, status: 'confirmada', created: iso, origin: opts.origin || 'whatsapp' });
         s.booking = bookingId;
         go({ step: 'menu' });
         const pro = db.users.find(u => u.id === s.pro);
