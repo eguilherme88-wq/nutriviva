@@ -1,50 +1,48 @@
 'use strict';
-/* NutriViva · servidor do atendimento automático (WhatsApp Cloud API).
- * Sem dependências externas: Node.js 18 ou mais recente.
+/* NutriViva · servidor do atendimento automático (WhatsApp Cloud API + Firebase).
+ * Usa o mesmo banco de dados do site (Cloud Firestore) e o mesmo login (Firebase Authentication).
  *   GET  /webhook   verificação do webhook pela Meta
  *   POST /webhook   mensagens recebidas → robô → resposta pelo WhatsApp
- *   POST /api/agent resposta de um atendente humano (protegida por ADMIN_TOKEN)
  *   GET  /health    verificação de funcionamento
+ * As respostas da equipe, escritas no painel do site, chegam pela coleção waOutbox e são enviadas daqui.
  */
 const http = require('http');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const NVBot = require('./bot-engine');
+const { createStore } = require('./firestore-store');
 
 loadEnv(path.join(__dirname, '.env'));
+if (!process.env.TZ) process.env.TZ = 'America/Sao_Paulo';
 const {
   PORT = '3000',
   VERIFY_TOKEN,
   APP_SECRET,
   WHATSAPP_TOKEN,
   PHONE_NUMBER_ID,
-  ADMIN_TOKEN = '',
-  SITE_URL = 'https://eguilherme88-wq.github.io/nutriviva/',
   GRAPH_VERSION = 'v26.0',
-  DB_FILE = path.join(__dirname, 'data', 'db.json'),
+  SITE_URL = 'https://eguilherme88-wq.github.io/nutriviva/',
+  FIREBASE_SERVICE_ACCOUNT = '',
 } = process.env;
-if (!process.env.TZ) process.env.TZ = 'America/Sao_Paulo';
 
 for (const [k, v] of Object.entries({ VERIFY_TOKEN, APP_SECRET, WHATSAPP_TOKEN, PHONE_NUMBER_ID })) {
   if (!v) { console.error(`Variável ${k} não configurada. Veja o arquivo .env.example.`); process.exit(1); }
 }
 
-// ---------- Banco de dados em arquivo JSON (mesmo formato do site) ----------
-function loadDb() {
-  if (!fs.existsSync(DB_FILE)) {
-    console.error(`Arquivo ${DB_FILE} não encontrado. Exporte os dados no painel (Atendimento WhatsApp → Exportar dados) e salve aqui.`);
-    process.exit(1);
-  }
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+// ---------- Firebase (Admin SDK) ----------
+const { initializeApp, cert, applicationDefault } = require('firebase-admin/app');
+const { getFirestore } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
+function credential() {
+  const v = FIREBASE_SERVICE_ACCOUNT.trim();
+  if (!v) return applicationDefault(); // GOOGLE_APPLICATION_CREDENTIALS ou ambiente do Google Cloud
+  return cert(v.startsWith('{') ? JSON.parse(v) : JSON.parse(fs.readFileSync(path.resolve(__dirname, v), 'utf8')));
 }
-let db = loadDb();
-function saveDb() {
-  const tmp = DB_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db));
-  fs.renameSync(tmp, DB_FILE);
-}
-// Processa uma mensagem por vez para não haver dois agendamentos no mesmo horário.
+initializeApp({ credential: credential() });
+const db = createStore(getFirestore(), getAuth());
+
+// Processa uma mensagem por vez.
 let queue = Promise.resolve();
 const serial = fn => (queue = queue.then(fn, fn));
 
@@ -53,10 +51,11 @@ async function sendText(to, body) {
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${PHONE_NUMBER_ID}/messages`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { preview_url: true, body: body.slice(0, 4096) } }),
+    body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'text', text: { preview_url: true, body: String(body).slice(0, 4096) } }),
   });
-  if (!res.ok) console.error('Falha ao enviar mensagem:', res.status, await res.text());
+  if (!res.ok) throw new Error(`WhatsApp respondeu ${res.status}: ${(await res.text()).slice(0, 300)}`);
 }
+const sendSafe = (to, body) => sendText(to, body).catch(e => console.error('Falha ao enviar mensagem:', e.message));
 
 // ---------- Mensagens recebidas ----------
 const seen = new Set();
@@ -70,20 +69,30 @@ async function handleMessage(msg) {
   if (!msg?.id || seen.has(msg.id)) return;
   seen.add(msg.id);
   if (seen.size > 5000) seen.delete(seen.values().next().value);
+  const phone = NVBot.normPhone(msg.from);
+  if (!phone) return;
   const text = textOf(msg);
-  if (text === null) {
-    await sendText(msg.from, 'Por enquanto eu entendo apenas mensagens de texto. Envie *menu* para ver as opções.');
-    return;
-  }
-  const result = await NVBot.reply(db, msg.from, text, {
+  if (text === null) return sendSafe(phone, 'Por enquanto eu entendo apenas mensagens de texto. Envie *menu* para ver as opções.');
+
+  const { data, base } = await db.load(phone);
+  const result = await NVBot.reply(data, phone, text, {
     uid: () => crypto.randomUUID(),
     now: () => new Date(),
-    hash: p => crypto.createHash('sha256').update(p, 'utf8').digest('hex'),
     siteUrl: SITE_URL,
+    createAccount: db.createAccount,
   });
-  if (result.changed) saveDb();
-  for (const r of result.replies) await sendText(msg.from, r);
+  try {
+    await db.save(phone, data, base, result.chat);
+  } catch (e) {
+    if (e.code !== 'SLOT_TAKEN') throw e;
+    await db.resetChat(phone);
+    return sendSafe(phone, 'Esse horário acabou de ser reservado por outra pessoa. 😕 Envie *1* para escolher outro horário.');
+  }
+  for (const r of result.replies) await sendSafe(phone, r);
 }
+
+// Respostas da equipe escritas no painel
+db.watchOutbox((phone, text) => sendText(NVBot.normPhone(phone), text), serial, e => console.error('Erro ao enviar resposta da equipe:', e));
 
 // ---------- HTTP ----------
 function readBody(req, limit = 1_000_000) {
@@ -110,7 +119,7 @@ http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && url.pathname === '/health') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({ ok: true, chats: (db.waChats || []).length }));
+      return res.end('{"ok":true}');
     }
     if (req.method === 'GET' && url.pathname === '/webhook') {
       const ok = url.searchParams.get('hub.mode') === 'subscribe' && safeEqual(url.searchParams.get('hub.verify_token') || '', VERIFY_TOKEN);
@@ -127,22 +136,6 @@ http.createServer(async (req, res) => {
           for (const msg of change.value?.messages || [])
             serial(() => handleMessage(msg).catch(e => console.error('Erro ao processar mensagem:', e)));
       return;
-    }
-    if (req.method === 'POST' && url.pathname === '/api/agent') {
-      if (!ADMIN_TOKEN || !safeEqual((req.headers.authorization || '').replace(/^Bearer /, ''), ADMIN_TOKEN)) { res.writeHead(401); return res.end(); }
-      const { phone, text, by = 'Equipe', handoff = true } = JSON.parse((await readBody(req, 20_000)).toString('utf8'));
-      const to = NVBot.normPhone(phone);
-      const chat = (db.waChats || []).find(c => c.phone === to);
-      if (!chat || !String(text || '').trim()) { res.writeHead(400); return res.end('Conversa ou texto inválido'); }
-      await serial(async () => {
-        const now = new Date().toISOString();
-        chat.messages.push({ from: 'agent', text: String(text).slice(0, 4096), at: now, by: String(by).slice(0, 80) });
-        chat.handoff = !!handoff; if (!handoff) chat.state = { step: 'menu' };
-        chat.updated = now; saveDb();
-        await sendText(to, String(text));
-      });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end('{"ok":true}');
     }
     res.writeHead(404); res.end();
   } catch (e) {

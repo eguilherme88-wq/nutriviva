@@ -1,0 +1,174 @@
+rules_version = '2';
+// NutriViva · regras de segurança do Cloud Firestore.
+// Publique em: Console do Firebase → Firestore Database → Regras (ou "firebase deploy --only firestore:rules").
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Funções auxiliares ----------
+    function signed() { return request.auth != null; }
+    function userPath(uid) { return /databases/$(database)/documents/users/$(uid); }
+    function slotPath(id) { return /databases/$(database)/documents/slots/$(id); }
+    function bookingPath(id) { return /databases/$(database)/documents/bookings/$(id); }
+    function configPath(id) { return /databases/$(database)/documents/config/$(id); }
+
+    // Perfil de quem está fazendo a requisição (antes / depois da gravação em lote).
+    function hasRole(roles) {
+      return signed() && exists(userPath(request.auth.uid)) && get(userPath(request.auth.uid)).data.role in roles;
+    }
+    function roleAfter(roles) {
+      return signed() && existsAfter(userPath(request.auth.uid)) && getAfter(userPath(request.auth.uid)).data.role in roles;
+    }
+    function staff() { return hasRole(['master', 'administrador', 'usuario']); }
+
+    // Matriz de acesso editada pelo master (config/matrix).
+    function perm(k) {
+      return hasRole(['master']) || (
+        hasRole(['administrador', 'usuario']) && exists(configPath('matrix')) &&
+        get(configPath('matrix')).data.get(get(userPath(request.auth.uid)).data.role, {}).get(k, false) == true
+      );
+    }
+
+    function only(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+    function same(field) { return request.resource.data.get(field, null) == resource.data.get(field, null); }
+
+    // Campos permitidos no perfil de um usuário (senhas ficam só no Firebase Authentication).
+    function profileOk() {
+      return request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'role', 'crn', 'specialty', 'bio',
+          'price', 'duration', 'photo', 'room', 'origin', 'created'])
+        && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 100
+        && (!('photo' in request.resource.data) || request.resource.data.photo.size() < 700000);
+    }
+    // O documento precisa corresponder ao login: paciente = celular, demais = e-mail.
+    function identityOk() {
+      let d = request.resource.data;
+      return (d.role == 'paciente' && d.phone is string && request.auth.token.email == d.phone + '@paciente.nutriviva.app')
+          || (d.role != 'paciente' && request.auth.token.email == d.email);
+    }
+
+    // ---------- Usuários ----------
+    match /users/{uid} {
+      // Perfis de nutricionistas são públicos (aparecem na página inicial).
+      allow read: if resource.data.role == 'nutricionista'
+        || (signed() && request.auth.uid == uid)
+        || staff()
+        || (hasRole(['nutricionista']) && resource.data.role == 'paciente');
+
+      allow create: if signed() && profileOk() && (
+          // Cadastro público: paciente (login pelo celular) ou nutricionista (login pelo e-mail)
+          (request.auth.uid == uid && request.resource.data.role in ['paciente', 'nutricionista'] && identityOk())
+          // Primeiro acesso: cria o master junto com config/setup
+          || (request.auth.uid == uid && request.resource.data.role == 'master' && identityOk()
+              && !exists(configPath('setup')) && getAfter(configPath('setup')).data.master == uid)
+          // Acessos internos criados pela equipe
+          || (request.auth.uid != uid && request.resource.data.role == 'usuario' && perm('users'))
+          || (request.auth.uid != uid && request.resource.data.role == 'administrador' && hasRole(['master'])));
+
+      allow update: if signed() && profileOk() && (
+          // A própria pessoa edita o perfil, sem trocar perfil de acesso, celular ou e-mail de login
+          (request.auth.uid == uid && same('role') && same('phone') && same('email'))
+          // O master alterna administrador ⇄ usuário
+          || (hasRole(['master']) && request.auth.uid != uid
+              && resource.data.role in ['administrador', 'usuario']
+              && request.resource.data.role in ['administrador', 'usuario'] && only(['role'])));
+    }
+
+    // ---------- Horários ----------
+    // "booking" guarda o id da consulta que ocupa o horário (null = livre).
+    // Como a gravação é atômica, dois pacientes nunca reservam o mesmo horário.
+    function bookingSlot(id) {
+      let bid = request.resource.data.booking;
+      return resource.data.get('booking', null) == null && bid is string
+        && getAfter(bookingPath(bid)).data.slot == id
+        && getAfter(bookingPath(bid)).data.status == 'confirmada'
+        && (getAfter(bookingPath(bid)).data.patient == request.auth.uid || perm('appointments'));
+    }
+    function freeingSlot() {
+      let bid = resource.data.get('booking', null);
+      return bid != null && request.resource.data.get('booking', null) == null
+        && getAfter(bookingPath(bid)).data.status == 'cancelada'
+        && (get(bookingPath(bid)).data.patient == request.auth.uid
+            || get(bookingPath(bid)).data.pro == request.auth.uid
+            || perm('appointments'));
+    }
+    match /slots/{id} {
+      allow read: if true;
+      allow create: if hasRole(['nutricionista']) && request.resource.data.pro == request.auth.uid
+        && request.resource.data.keys().hasOnly(['pro', 'date', 'time', 'booking'])
+        && request.resource.data.get('booking', null) == null
+        && request.resource.data.date is string && request.resource.data.time is string;
+      allow delete: if hasRole(['nutricionista']) && resource.data.pro == request.auth.uid
+        && resource.data.get('booking', null) == null;
+      allow update: if signed() && only(['booking']) && (bookingSlot(id) || freeingSlot());
+    }
+
+    // ---------- Consultas ----------
+    match /bookings/{id} {
+      allow read: if signed() && (resource.data.patient == request.auth.uid
+        || resource.data.pro == request.auth.uid || perm('appointments'));
+      allow create: if hasRole(['paciente'])
+        && request.resource.data.patient == request.auth.uid
+        && request.resource.data.status == 'confirmada'
+        && request.resource.data.keys().hasOnly(['slot', 'patient', 'pro', 'status', 'created', 'origin'])
+        && getAfter(slotPath(request.resource.data.slot)).data.booking == id
+        && getAfter(slotPath(request.resource.data.slot)).data.pro == request.resource.data.pro;
+      allow update: if signed() && same('patient') && same('pro') && same('slot') && (
+          (resource.data.patient == request.auth.uid && resource.data.status == 'confirmada'
+            && request.resource.data.status == 'cancelada' && only(['status', 'cancelled', 'cancelledBy']))
+          || (resource.data.pro == request.auth.uid && only(['status', 'room', 'cancelled', 'cancelledBy', 'completed']))
+          || perm('appointments'));
+    }
+
+    // ---------- Prontuário do nutricionista ----------
+    function proOwns() {
+      return hasRole(['nutricionista']) && request.resource.data.pro == request.auth.uid
+        && (resource == null || resource.data.pro == request.auth.uid);
+    }
+    match /prescriptions/{id} {
+      // O paciente só vê receituários disponibilizados para ele.
+      allow read: if signed() && (resource.data.pro == request.auth.uid
+        || (resource.data.patient == request.auth.uid && resource.data.status == 'disponivel'));
+      allow create, update: if proOwns();
+    }
+    match /clinicalEntries/{id} {
+      allow read: if signed() && resource.data.pro == request.auth.uid;
+      allow create, update: if proOwns();
+    }
+    match /anamneses/{id} {
+      allow read: if signed() && resource.data.pro == request.auth.uid;
+      allow create, update: if proOwns();
+    }
+    match /patientLinks/{id} {
+      allow read: if signed() && resource.data.pro == request.auth.uid;
+      allow create, update: if proOwns();
+    }
+
+    // ---------- Publicidade ----------
+    match /ads/{id} {
+      allow read: if resource.data.active == true || (hasRole(['master', 'administrador']) && perm('ads'));
+      allow create, update, delete: if hasRole(['master', 'administrador']) && perm('ads');
+    }
+
+    // ---------- Configurações ----------
+    match /config/{doc} {
+      allow read: if true;
+      allow create: if doc == 'setup' && signed() && !exists(configPath('setup'))
+        && request.resource.data.master == request.auth.uid && roleAfter(['master']);
+      allow create, update: if doc == 'matrix' && roleAfter(['master']);
+      allow create, update: if doc == 'whatsapp' && (roleAfter(['master']) || hasRole(['administrador']));
+    }
+
+    // ---------- WhatsApp ----------
+    // Conversas são gravadas pelo servidor do robô (Admin SDK). A equipe lê e assume conversas.
+    match /waChats/{phone} {
+      allow read, update: if perm('appointments');
+    }
+    // Respostas da equipe: o servidor do robô envia e marca como enviadas.
+    match /waOutbox/{id} {
+      allow read: if perm('appointments');
+      allow create: if perm('appointments')
+        && request.resource.data.keys().hasOnly(['phone', 'text', 'by', 'at', 'sent'])
+        && request.resource.data.sent == false
+        && request.resource.data.text is string && request.resource.data.text.size() <= 4096;
+    }
+  }
+}

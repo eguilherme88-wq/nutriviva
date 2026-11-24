@@ -1,7 +1,7 @@
 # NutriViva · Atendimento automático pelo WhatsApp
 
 Servidor que conecta o robô do NutriViva à **WhatsApp Cloud API** (API oficial da Meta).
-O robô é o mesmo do simulador do site (`bot-engine.js`).
+O robô é o mesmo do simulador do site (`bot-engine.js`) e usa o mesmo banco de dados do site, o **Firebase**.
 
 ## O que o paciente consegue fazer pelo WhatsApp
 
@@ -21,57 +21,56 @@ O paciente é identificado pelo número de WhatsApp.
 
 - Quem agenda sem cadastro informa o **nome** e cria uma **senha** (mínimo de 8 caracteres) na conversa.
 - O **celular é o login** do paciente na plataforma, e é obrigatório. No dia da consulta, ele entra com o celular e a senha e clica em *Entrar na sala*.
-- A senha é gravada apenas como hash SHA-256, o mesmo formato do login do site. No histórico da conversa ela aparece como `•••••••• (senha ocultada)`.
+- A senha vai direto para o **Firebase Authentication** e não é gravada no banco. No histórico da conversa ela aparece como `•••••••• (senha ocultada)`.
   O robô orienta o paciente a apagar a mensagem com a senha no próprio WhatsApp.
 - O endereço da plataforma enviado ao paciente vem da variável `SITE_URL`.
 
 ## Instalação
 
-Requisitos: Node.js 18 ou mais recente, um endereço **HTTPS** público (Render, Railway, Fly.io, uma VPS etc.)
-e uma conta na Meta for Developers com o produto WhatsApp.
+Requisitos:
+
+- Node.js 20 ou mais recente;
+- um endereço **HTTPS** público (Render, Railway, Fly.io, Google Cloud Run, uma VPS etc.);
+- o projeto do Firebase já configurado (veja [`../FIREBASE.md`](../FIREBASE.md));
+- uma conta na Meta for Developers com o produto WhatsApp.
 
 1. **Meta for Developers**: crie um app do tipo *Business*, adicione o produto **WhatsApp** e registre o número da clínica.
    Anote o *Phone number ID* e a *Chave secreta do app* (App Secret).
 2. **Token permanente**: no Business Manager, crie um *usuário do sistema* com a permissão
    `whatsapp_business_messaging` e gere um token. O token temporário do painel expira em 24 horas.
-3. **Dados**: no site, entre como master ou administrador → **Atendimento WhatsApp** →
-   **Exportar dados para o servidor**. Salve o arquivo como `data/db.json`.
+3. **Chave do Firebase**: no console do Firebase, abra ⚙ Configurações do projeto → **Contas de serviço** →
+   **Gerar nova chave privada**. Salve o arquivo como `service-account.json` nesta pasta.
+   Ele dá acesso total ao banco: **nunca** envie esse arquivo para o GitHub (já está no `.gitignore`).
 4. **Configuração**: copie `.env.example` para `.env` e preencha os valores.
-5. **Iniciar**: `npm start`. Para conferir, abra `https://seu-servidor/health`.
+5. **Instalar e iniciar**: `npm install` e depois `npm start`. Para conferir, abra `https://seu-servidor/health`.
 6. **Webhook**: no painel da Meta → WhatsApp → Configuração, informe
    `https://seu-servidor/webhook` e o mesmo `VERIFY_TOKEN` do `.env`. Assine o campo **messages**.
+7. **Número no site**: no painel do site (master ou administrador) → **Atendimento WhatsApp**, preencha o número oficial.
+   Com isso, o botão verde da página inicial abre o WhatsApp da clínica.
 
 Envie “oi” para o número da clínica para testar.
 
-## Resposta da equipe (atendente humano)
+## Como os dados circulam
 
-Quando o paciente escolhe a opção 6, a conversa fica com `handoff: true` e o robô para de responder.
-Para enviar uma resposta pelo WhatsApp oficial:
+- O robô lê e grava no **mesmo banco do site** (Cloud Firestore), com a conta de serviço.
+  Agendamentos e cancelamentos pelo WhatsApp aparecem na hora nos painéis, e vice-versa.
+- Quem se cadastra pelo WhatsApp ganha um login no **Firebase Authentication** (celular + senha criada na conversa).
+  No dia da consulta, essa pessoa entra no site com o mesmo celular e a mesma senha.
+- A reserva do horário é gravada numa **transação**: se outra pessoa reservou um instante antes, nada é gravado e o
+  paciente recebe “Esse horário acabou de ser reservado”.
+- **Resposta da equipe:** no painel → Atendimento WhatsApp → Abrir conversa → Responder. A mensagem vai para a coleção
+  `waOutbox`, e este servidor a envia pelo WhatsApp oficial.
 
-```bash
-curl -X POST https://seu-servidor/api/agent \
-  -H "Authorization: Bearer SEU_ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{"phone":"5547999990000","text":"Olá! Aqui é a recepção.","by":"Recepção"}'
-```
+## Limites importantes
 
-Envie `"handoff": false` para devolver a conversa ao robô.
-
-## Limites importantes desta versão
-
-- **Os dados não sincronizam com o site.** O site de demonstração guarda tudo no navegador (localStorage).
-  O servidor usa a cópia `data/db.json`. Um agendamento feito pelo WhatsApp não aparece no site, e o contrário também vale.
-  Para operar de verdade, site e robô precisam usar o **mesmo banco de dados** no servidor, com login seguro.
-  O `bot-engine.js` já recebe o objeto de dados por parâmetro, então pode ser ligado a esse banco sem reescrever o robô.
 - **Janela de 24 horas:** pelas regras do WhatsApp, respostas livres só podem ser enviadas até 24 horas após a última mensagem do paciente.
-  Lembretes de consulta enviados por iniciativa da clínica exigem **modelos de mensagem aprovados** pela Meta (com custo por mensagem).
-- **Dados de saúde (LGPD):** consultas e nomes de pacientes são dados sensíveis. Use HTTPS, proteja o `.env` e o `data/db.json`,
-  restrinja o acesso ao servidor e informe o tratamento de dados na política de privacidade.
+  Lembretes enviados por iniciativa da clínica exigem **modelos de mensagem aprovados** pela Meta (com custo por mensagem).
+- **Dados de saúde (LGPD):** use HTTPS, proteja o `.env` e o `service-account.json`, restrinja o acesso ao servidor e ao console do
+  Firebase e informe o tratamento de dados na política de privacidade.
 - Apenas mensagens de texto e respostas de botão são entendidas. Áudios, imagens e figurinhas recebem uma orientação para usar texto.
-- O arquivo JSON atende bem a um consultório pequeno. Para volume maior, troque por um banco como PostgreSQL ou SQLite.
 
 ## Próximos passos sugeridos
 
-1. Banco de dados compartilhado entre o site e o robô.
+1. Opção “esqueci minha senha” pelo WhatsApp (o servidor já consegue redefinir a senha do login do paciente).
 2. Lembrete automático 24 horas antes da consulta (modelo de mensagem aprovado).
 3. Botões e listas interativas do WhatsApp no lugar de respostas numéricas.
-4. Tela de atendimento da equipe no painel, ligada ao endpoint `/api/agent`.

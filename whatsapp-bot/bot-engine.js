@@ -1,7 +1,8 @@
 /* NutriViva · motor do atendimento automático pelo WhatsApp.
  * O mesmo arquivo roda no navegador (simulador do site) e no servidor Node (WhatsApp Cloud API).
  * await NVBot.reply(db, telefone, texto, {uid, now, hash, siteUrl}) altera o objeto db e devolve {replies, changed, chat}.
- * hash(senha) deve devolver o SHA-256 em hexadecimal (o mesmo usado no login do site).
+ * hash(senha) deve devolver o SHA-256 em hexadecimal (modo demonstração, login no navegador).
+ * createAccount({phone, name, password}) cria o login no Firebase Authentication e devolve o id (modo Firebase).
  */
 (function (root, factory) {
   const api = factory();
@@ -33,7 +34,7 @@
 
   function freeSlots(db, proId, now) {
     return db.slots
-      .filter(s => s.pro === proId && when(s) > now && !db.bookings.some(b => b.slot === s.id && b.status !== 'cancelada'))
+      .filter(s => s.pro === proId && when(s) > now && !s.booking && !db.bookings.some(b => b.slot === s.id && b.status !== 'cancelada'))
       .sort((a, b) => when(a) - when(b));
   }
   // Consultas confirmadas que ainda não terminaram (inclui a que está acontecendo agora).
@@ -239,7 +240,7 @@
         if (!id) { invalid((state.options || []).length); break; }
         if (!freeSlots(db, state.pro, now).some(s => s.id === id)) { say('Esse horário acabou de ser reservado.'); listTimes(state.pro, state.date); break; }
         const known = patient();
-        if (known && known.password) askConfirm(id);
+        if (known && (known.password || opts.createAccount)) askConfirm(id);
         else if (known) { go({ step: 'askPassword', slot: id, pro: state.pro, date: state.date, name: known.name }); say(passwordPrompt()); }
         else { go({ step: 'askName', slot: id, pro: state.pro, date: state.date }); say('Você ainda não tem cadastro. Vamos criar agora, leva menos de um minuto. 🙂\n\nQual é o seu *nome completo*?'); }
         break;
@@ -254,11 +255,21 @@
       case 'askPassword': {
         const pass = body.trim();
         if (pass.length < 8 || pass.length > 64) { say('A senha precisa ter de *8 a 64 caracteres*. Envie outra senha (ou *menu* para voltar).'); break; }
-        if (typeof opts.hash !== 'function') { go({ step: 'menu' }); say('Não foi possível criar o cadastro agora. Envie *6* para falar com um atendente.'); break; }
-        const passwordHash = await opts.hash(pass);
         let p = patient();
-        if (p) p.password = passwordHash;
-        else { p = { id: uid(), name: state.name, email: '', password: passwordHash, role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
+        try {
+          if (typeof opts.createAccount === 'function') {
+            const id = await opts.createAccount({ phone, name: state.name || p?.name, password: pass });
+            if (!p) { p = { id, name: state.name, email: '', role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
+          } else if (typeof opts.hash === 'function') {
+            const passwordHash = await opts.hash(pass);
+            if (p) p.password = passwordHash;
+            else { p = { id: uid(), name: state.name, email: '', password: passwordHash, role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
+          } else throw Error('sem método de cadastro');
+        } catch (e) {
+          go({ step: 'menu' });
+          say('Não foi possível criar o seu cadastro agora. Tente novamente em alguns minutos ou envie *6* para falar com um atendente.');
+          break;
+        }
         say(`Cadastro pronto, *${p.name.split(' ')[0]}*! ✅\n\nPara entrar na plataforma no dia da consulta:\n📱 Login: *${prettyPhone(phone)}* (este celular)\n🔒 Senha: a que você acabou de criar${siteUrl ? '\n🌐 ' + siteUrl : ''}\n\nPor segurança, apague a mensagem com a senha desta conversa (toque e segure → Apagar).`);
         askConfirm(state.slot);
         break;
@@ -269,7 +280,9 @@
         const s = db.slots.find(x => x.id === state.slot), p = patient();
         if (!s || !p || !freeSlots(db, s.pro, now).some(x => x.id === s.id)) { say('Esse horário não está mais disponível.'); listTimes(state.pro, state.date); break; }
         if (overlaps(db, p.id, s)) { go({ step: 'menu' }); say('Você já tem uma consulta nesse período. Envie *2* para ver suas consultas.'); break; }
-        db.bookings.push({ id: uid(), slot: s.id, patient: p.id, status: 'confirmada', created: iso, origin: 'whatsapp' });
+        const bookingId = uid();
+        db.bookings.push({ id: bookingId, slot: s.id, patient: p.id, pro: s.pro, status: 'confirmada', created: iso, origin: 'whatsapp' });
+        s.booking = bookingId;
         go({ step: 'menu' });
         const pro = db.users.find(u => u.id === s.pro);
         say(`Consulta agendada! ✅\n\n📅 ${fmt(s)}\n🩺 ${pro?.name || ''}\n\nNo dia, entre na plataforma com seu celular e senha${siteUrl ? ' em ' + siteUrl : ''} e clique em *Entrar na sala*. Se preferir, envie *5* aqui para receber o link da videochamada. Para cancelar, envie *3*.`);
@@ -291,6 +304,8 @@
         go({ step: 'menu' });
         if (!p || !b || b.patient !== p.id || b.status !== 'confirmada') { say('Não foi possível cancelar essa consulta. Envie *6* para falar com um atendente.'); break; }
         b.status = 'cancelada'; b.cancelled = iso; b.cancelledBy = 'whatsapp';
+        const freed = db.slots.find(x => x.id === b.slot);
+        if (freed && freed.booking === b.id) freed.booking = null;
         say('Consulta cancelada. O horário voltou para a agenda do nutricionista. Se quiser remarcar, envie *1*.');
         thanks(true);
         break;
