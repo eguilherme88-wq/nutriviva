@@ -1,9 +1,10 @@
 {
   "name": "nutriviva-whatsapp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Atendimento automático do NutriViva pelo WhatsApp Cloud API",
+  "description": "Atendimento automático do NutriViva pelo WhatsApp Cloud API, ligado ao Firebase",
   "main": "server.js",
-  "engines": { "node": ">=18" },
-  "scripts": { "start": "node server.js" }
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "firebase-admin": "^14.5.1" }
 }
