@@ -80,6 +80,7 @@ async function handleMessage(msg) {
     now: () => new Date(),
     siteUrl: SITE_URL,
     createAccount: db.createAccount,
+    resetPassword: (uid, password) => getAuth().updateUser(uid, { password }),
   });
   try {
     await db.save(phone, data, base, result.chat);

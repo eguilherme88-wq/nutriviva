@@ -34,7 +34,8 @@ service cloud.firestore {
     // Campos permitidos no perfil de um usuário (senhas ficam só no Firebase Authentication).
     function profileOk() {
       return request.resource.data.keys().hasOnly(['name', 'email', 'phone', 'role', 'crn', 'specialty', 'bio',
-          'price', 'duration', 'photo', 'room', 'origin', 'created'])
+          'price', 'duration', 'photo', 'room', 'origin', 'created',
+          'policyVersion', 'policyAcceptedAt', 'tcleVersion', 'tcleAcceptedAt', 'eNutri'])
         && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 100
         && (!('photo' in request.resource.data) || request.resource.data.photo.size() < 700000);
     }
@@ -155,6 +156,18 @@ service cloud.firestore {
         && request.resource.data.master == request.auth.uid && roleAfter(['master']);
       allow create, update: if doc == 'matrix' && roleAfter(['master']);
       allow create, update: if doc == 'whatsapp' && (roleAfter(['master']) || hasRole(['administrador']));
+      allow create, update: if doc == 'privacy' && (roleAfter(['master']) || hasRole(['administrador']));
+    }
+
+    // ---------- LGPD: solicitações dos titulares ----------
+    match /privacyRequests/{id} {
+      allow read: if signed() && (resource.data.user == request.auth.uid || hasRole(['master', 'administrador']));
+      allow create: if signed() && request.resource.data.user == request.auth.uid
+        && request.resource.data.status == 'aberta'
+        && request.resource.data.keys().hasOnly(['user', 'name', 'phone', 'email', 'role', 'type', 'text', 'status', 'created'])
+        && request.resource.data.text is string && request.resource.data.text.size() <= 2000;
+      allow update: if hasRole(['master', 'administrador']) && same('user') && same('text') && same('type')
+        && only(['status', 'response', 'updated', 'handledBy']);
     }
 
     // ---------- WhatsApp ----------

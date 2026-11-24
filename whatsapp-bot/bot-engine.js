@@ -3,6 +3,7 @@
  * await NVBot.reply(db, telefone, texto, {uid, now, hash, siteUrl}) altera o objeto db e devolve {replies, changed, chat}.
  * hash(senha) deve devolver o SHA-256 em hexadecimal (modo demonstração, login no navegador).
  * createAccount({phone, name, password}) cria o login no Firebase Authentication e devolve o id (modo Firebase).
+ * resetPassword(id, senha) troca a senha do paciente (só no WhatsApp oficial, onde o número já é verificado).
  */
 (function (root, factory) {
   const api = factory();
@@ -87,6 +88,8 @@
     db.waChats = Array.isArray(db.waChats) ? db.waChats : [];
     const cfg = db.whatsapp || {};
     const siteUrl = String(opts.siteUrl || cfg.siteUrl || '').trim();
+    const POLICY = opts.policyVersion || '2026-11-24', TCLE = opts.tcleVersion || '2026-11-24';
+    const legal = { policyVersion: POLICY, policyAcceptedAt: iso };
 
     let chat = db.waChats.find(c => c.phone === phone);
     if (!chat) {
@@ -99,7 +102,7 @@
 
     const body = String(text || '').slice(0, 1000);
     // A senha digitada no cadastro nunca fica gravada no histórico da conversa.
-    const secret = !chat.handoff && !idle && cfg.enabled !== false && chat.state?.step === 'askPassword';
+    const secret = !chat.handoff && !idle && cfg.enabled !== false && ['askPassword', 'resetPassword'].includes(chat.state?.step);
     chat.messages.push({ from: 'user', text: secret ? '•••••••• (senha ocultada)' : body, at: iso });
     const out = [];
     const say = m => out.push(m);
@@ -124,7 +127,7 @@
         : `Muito obrigado por agendar com a NutriViva${first ? ', *' + first + '*' : ''}! 💚\nFicamos felizes em fazer parte do seu cuidado. Até a consulta! 🌿`);
     }
     function passwordPrompt() {
-      return `Agora crie uma *senha* com pelo menos 8 caracteres.\n\nNo dia da consulta, você vai entrar na plataforma com *este celular* e essa senha para acessar a videochamada.`;
+      return `Agora crie uma *senha* com pelo menos 8 caracteres.\n\nNo dia da consulta, você vai entrar na plataforma com *este celular* e essa senha para acessar a videochamada.${siteUrl ? `\n\nAo criar o cadastro, você concorda com a nossa Política de Privacidade: ${siteUrl}#privacidade` : ''}`;
     }
     function startBooking() {
       const list = pros(db).map(p => ({ p, free: freeSlots(db, p.id, now) })).filter(x => x.free.length).slice(0, MAX_PROS);
@@ -170,7 +173,8 @@
       const s = db.slots.find(x => x.id === slotId), p = db.users.find(u => u.id === s?.pro), pat = patient();
       if (!s || !p || !pat) return startBooking();
       go({ step: 'confirm', slot: slotId, pro: p.id, date: s.date });
-      say(`Confira sua consulta:\n\n👤 ${pat.name}\n🩺 ${p.name} — ${p.specialty || 'Nutrição'}\n📅 ${fmt(s)}\n⏱ ${p.duration || 50} min · ${money(p.price)}\n💻 On-line, por videochamada\n\n*1* Confirmar\n*2* Escolher outro horário`);
+      const tcle = pat.tcleAcceptedAt ? '' : `\n\n📄 Antes da primeira consulta on-line, leia o Termo de Consentimento para Telenutrição${siteUrl ? `: ${siteUrl}#tcle` : ' (disponível no site)'}. Ao confirmar, você declara que leu e aceita o termo.`;
+      say(`Confira sua consulta:\n\n👤 ${pat.name}\n🩺 ${p.name} — ${p.specialty || 'Nutrição'}\n📅 ${fmt(s)}\n⏱ ${p.duration || 50} min · ${money(p.price)}\n💻 On-line, por videochamada${tcle}\n\n*1* Confirmar\n*2* Escolher outro horário`);
     }
     function listMine(forStep) {
       const p = patient();
@@ -224,6 +228,13 @@
     // 3. Comandos globais
     else if (GREETINGS.includes(t)) { go({ step: 'menu' }); say(greeting()); }
     else if (BYE.includes(t)) { go({ step: 'menu' }); say('Até logo! Quando precisar, é só mandar *oi*. 🌿'); }
+    else if (/esqueci|redefinir|recuperar senha|nova senha|trocar (a |minha )?senha/.test(t) && !['askPassword', 'resetPassword'].includes(state.step)) {
+      go({ step: 'menu' });
+      const p = patient();
+      if (typeof opts.resetPassword !== 'function') say('Para criar uma nova senha, envie *esqueci minha senha* pelo WhatsApp oficial da clínica, usando o celular do seu cadastro. Assim confirmamos que o número é seu.');
+      else if (!p) say(NOT_FOUND);
+      else { go({ step: 'resetPassword' }); say(`Vamos criar uma nova senha para o login *${prettyPhone(phone)}*.\n\nEnvie a *nova senha* (mínimo de 8 caracteres), ou *menu* para cancelar.`); }
+    }
     // 4. Etapas da conversa
     else switch (state.step) {
       case 'pickPro': { const id = pick(state.options || []); id ? listDates(id) : invalid((state.options || []).length); break; }
@@ -245,6 +256,14 @@
         else { go({ step: 'askName', slot: id, pro: state.pro, date: state.date }); say('Você ainda não tem cadastro. Vamos criar agora, leva menos de um minuto. 🙂\n\nQual é o seu *nome completo*?'); }
         break;
       }
+      case 'resetPassword': {
+        const pass = body.trim(), p = patient();
+        if (pass.length < 8 || pass.length > 64) { say('A senha precisa ter de *8 a 64 caracteres*. Envie outra senha (ou *menu* para cancelar).'); break; }
+        go({ step: 'menu' });
+        try { await opts.resetPassword(p.id, pass); say(`Senha alterada! ✅\n\nEntre na plataforma com *${prettyPhone(phone)}* e a nova senha${siteUrl ? ` em ${siteUrl}` : ''}.\n\nPor segurança, apague a mensagem com a senha desta conversa.`); }
+        catch (e) { say('Não foi possível alterar a senha agora. Tente novamente em alguns minutos ou envie *6* para falar com um atendente.'); }
+        break;
+      }
       case 'askName': {
         const name = body.trim().replace(/\s+/g, ' ');
         if (name.length < 3 || name.length > 100 || !/\p{L}{2,}/u.test(name) || /^\d+$/.test(name)) { say('Por favor, envie seu nome completo (ou *menu* para voltar).'); break; }
@@ -260,11 +279,11 @@
           if (typeof opts.createAccount === 'function') {
             const id = await opts.createAccount({ phone, name: state.name || p?.name, password: pass });
             if (!p) p = patient(); // o cadastro pode já ter chegado pelo banco
-            if (!p) { p = { id, name: state.name, email: '', role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
+            if (!p) { p = { id, name: state.name, email: '', role: 'paciente', phone, origin: opts.origin || 'whatsapp', created: iso, ...legal }; db.users.push(p); }
           } else if (typeof opts.hash === 'function') {
             const passwordHash = await opts.hash(pass);
             if (p) p.password = passwordHash;
-            else { p = { id: uid(), name: state.name, email: '', password: passwordHash, role: 'paciente', phone, origin: 'whatsapp', created: iso }; db.users.push(p); }
+            else { p = { id: uid(), name: state.name, email: '', password: passwordHash, role: 'paciente', phone, origin: opts.origin || 'whatsapp', created: iso, ...legal }; db.users.push(p); }
           } else throw Error('sem método de cadastro');
         } catch (e) {
           go({ step: 'menu' });
@@ -281,6 +300,7 @@
         const s = db.slots.find(x => x.id === state.slot), p = patient();
         if (!s || !p || !freeSlots(db, s.pro, now).some(x => x.id === s.id)) { say('Esse horário não está mais disponível.'); listTimes(state.pro, state.date); break; }
         if (overlaps(db, p.id, s)) { go({ step: 'menu' }); say('Você já tem uma consulta nesse período. Envie *2* para ver suas consultas.'); break; }
+        if (!p.tcleAcceptedAt) Object.assign(p, { tcleVersion: TCLE, tcleAcceptedAt: iso });
         const bookingId = uid();
         db.bookings.push({ id: bookingId, slot: s.id, patient: p.id, pro: s.pro, status: 'confirmada', created: iso, origin: opts.origin || 'whatsapp' });
         s.booking = bookingId;

@@ -61,7 +61,6 @@ Fotos são reduzidas automaticamente antes de salvar, para caber no banco.
 - **Troca de celular ou e-mail de login** é feita pela clínica, não pelo próprio usuário.
 - **Nutricionistas veem a lista de pacientes cadastrados** (nome e contato), para poder vincular pacientes. O prontuário de cada um
   continua visível só para o próprio nutricionista.
-- **LGPD:** são dados de saúde. Antes de usar dados reais, publique uma política de privacidade, colete o consentimento e defina
-  quem na clínica tem acesso ao console do Firebase.
+- **LGPD:** são dados de saúde. Veja [`LGPD.md`](LGPD.md): o que a plataforma já faz e o que a clínica ainda precisa fazer.
 - **Testes:** as regras de segurança foram escritas e revisadas, mas o emulador oficial do Firestore não estava disponível no ambiente
   de desenvolvimento. Teste os perfis (paciente, nutricionista, equipe) logo após publicar, ou use o **Simulador de regras** do console.
